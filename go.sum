@@ -1,0 +1,4 @@
+github.com/xorcare/tornado v0.2.1 h1:NnEUFWbx7QYSJtTjaYWjFzsDkhxSCHf6BSD4Q46GhdY=
+github.com/xorcare/tornado v0.2.1/go.mod h1:4L6WWlzRnIRbIXDJOE4M2PQkre/AVKOd9Ra1dhi6n5Y=
+golang.org/x/net v0.39.0 h1:ZCu7HMWDxpXpaiKdhzIfaltL9Lp31x/3fCP11bc6/fY=
+golang.org/x/net v0.39.0/go.mod h1:X7NRbYVEA+ewNkCNyJ513WmMdQ3BineSwVtN2zD/d+E=

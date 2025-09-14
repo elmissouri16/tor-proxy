@@ -1,0 +1,22 @@
+# Tor configuration file
+
+# SOCKS port for proxy connections
+SOCKSPort 0.0.0.0:9050
+
+# Control port for programmatic control
+ControlPort 9051
+
+# Disable Tor logging to reduce disk usage
+Log notice stderr
+
+# Data directory for Tor
+DataDirectory /var/lib/tor
+
+# Allow connections from any IP (for Docker)
+SocksPolicy accept *
+
+# Circuit build timeout
+CircuitBuildTimeout 30
+
+# Reduce the number of entry guards to speed up circuit creation
+NumEntryGuards 4

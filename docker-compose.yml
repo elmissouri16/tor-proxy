@@ -1,0 +1,8 @@
+services:
+  tor-proxy:
+    build: .
+    ports:
+      - "8080:8080"
+    # Mount tor configuration if needed
+    volumes:
+      - ./torrc:/etc/tor/torrc:ro
