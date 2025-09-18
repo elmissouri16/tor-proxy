@@ -140,16 +140,24 @@ func (lb *LoadBalancer) HTTPProxyHandler(w http.ResponseWriter, r *http.Request)
 
 // SOCKS5ProxyAddressHandler returns the SOCKS5 proxy address with usage instructions
 func (lb *LoadBalancer) SOCKS5ProxyAddressHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
-	fmt.Fprintln(w, "SOCKS5 Proxy Address: socks5://127.0.0.1:9050")
-	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "To use this SOCKS5 proxy directly:")
-	fmt.Fprintln(w, "- Configure your application to use SOCKS5 proxy at 127.0.0.1:9050")
-	fmt.Fprintln(w, "- With curl: curl --socks5 127.0.0.1:9050 http://example.com")
-	fmt.Fprintln(w, "- With wget: wget --socks-proxy=127.0.0.1:9050 http://example.com")
-	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "Note: This HTTP endpoint provides information about the SOCKS5 proxy.")
-	fmt.Fprintln(w, "The actual SOCKS5 proxy service is running on port 9050.")
+	response := map[string]interface{}{
+		"proxy":       "socks5://127.0.0.1:9050",
+		"host":        "127.0.0.1",
+		"port":        9050,
+		"protocol":    "socks5",
+		"description": "SOCKS5 proxy address for direct use",
+		"usage_examples": []string{
+			"curl --socks5 127.0.0.1:9050 http://example.com",
+			"wget --socks-proxy=127.0.0.1:9050 http://example.com",
+		},
+		"note": "This HTTP endpoint provides information about the SOCKS5 proxy. The actual SOCKS5 proxy service is running on port 9050.",
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, fmt.Sprintf("failed to encode JSON response: %v", err), http.StatusInternalServerError)
+		return
+	}
 }
 
 // HealthCheckHandler handles health check requests
