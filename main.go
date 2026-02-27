@@ -3,14 +3,18 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,19 +29,122 @@ const (
 	// Server port to listen on
 	ServerPort = ":8080"
 
+	// SOCKS5 listen address for direct proxy usage
+	SOCKS5ListenAddress = ":9050"
+
 	// HTTP client timeout for requests
 	HTTPClientTimeout = 30 * time.Second
 )
 
+var (
+	// SOCKS5 address advertised to local clients (can differ from listen address in Docker).
+	SOCKS5AdvertisedAddress = getenvOrDefault("SOCKS5_ADVERTISED_ADDRESS", "127.0.0.1:9050")
+)
+
+func getenvOrDefault(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
+}
+
 // LoadBalancer distributes requests among Tor proxies
 type LoadBalancer struct {
-	proxyPool *tornado.Pool
+	proxyPool *TorProxyPool
+}
+
+// TorProxyPool manages multiple independent Tor proxy processes.
+type TorProxyPool struct {
+	ch       chan *tornado.Proxy
+	proxies  []*tornado.Proxy
+	closeMut sync.Mutex
+	closed   bool
+}
+
+func NewTorProxyPool(ctx context.Context, size int) (*TorProxyPool, error) {
+	if size <= 0 {
+		return nil, fmt.Errorf("invalid pool size %d", size)
+	}
+
+	pool := &TorProxyPool{
+		ch: make(chan *tornado.Proxy, size),
+	}
+
+	for i := 0; i < size; i++ {
+		prx, err := tornado.NewProxy(ctx)
+		if err != nil {
+			_ = pool.Close()
+			return nil, fmt.Errorf("failed to start Tor proxy %d/%d: %w", i+1, size, err)
+		}
+
+		pool.proxies = append(pool.proxies, prx)
+		pool.ch <- prx
+	}
+
+	return pool, nil
+}
+
+func (p *TorProxyPool) Get() (*tornado.Proxy, error) {
+	prx := <-p.ch
+	if prx == nil {
+		return nil, errors.New("tor proxy pool is closed")
+	}
+	return prx, nil
+}
+
+func (p *TorProxyPool) Put(prx *tornado.Proxy) {
+	if prx == nil {
+		return
+	}
+
+	p.closeMut.Lock()
+	closed := p.closed
+	p.closeMut.Unlock()
+	if closed {
+		_ = prx.Close()
+		return
+	}
+
+	p.ch <- prx
+}
+
+func (p *TorProxyPool) Close() error {
+	p.closeMut.Lock()
+	if p.closed {
+		p.closeMut.Unlock()
+		return nil
+	}
+	p.closed = true
+	proxies := append([]*tornado.Proxy(nil), p.proxies...)
+	p.closeMut.Unlock()
+
+	var closeErr error
+	for _, prx := range proxies {
+		if err := prx.Close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+
+	return closeErr
+}
+
+// pooledConn returns the proxy to the pool when the connection is closed.
+type pooledConn struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (pc *pooledConn) Close() error {
+	err := pc.Conn.Close()
+	pc.once.Do(pc.release)
+	return err
 }
 
 // NewLoadBalancer creates a new load balancer with Tor proxies
 func NewLoadBalancer(ctx context.Context, poolSize int) (*LoadBalancer, error) {
-	// Create a pool of Tor proxies using Tornado
-	pool, err := tornado.NewPool(ctx, poolSize)
+	// Create a pool of independent Tor proxy processes.
+	pool, err := NewTorProxyPool(ctx, poolSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Tor proxy pool: %w", err)
 	}
@@ -47,11 +154,211 @@ func NewLoadBalancer(ctx context.Context, poolSize int) (*LoadBalancer, error) {
 	}, nil
 }
 
-// getHealthyProxy randomly selects a healthy proxy from the pool
+// getHealthyProxy acquires a proxy from the pool.
 func (lb *LoadBalancer) getHealthyProxy() (*tornado.Proxy, error) {
-	// Get a proxy from the pool (Tornado handles health checks internally)
-	proxy := lb.proxyPool.Get()
-	return proxy, nil
+	return lb.proxyPool.Get()
+}
+
+// dialThroughPool establishes a network connection through a Tor proxy from the pool.
+func (lb *LoadBalancer) dialThroughPool(ctx context.Context, network, address string) (net.Conn, error) {
+	torProxy, err := lb.getHealthyProxy()
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err := torProxy.DialContext(ctx, network, address)
+	if err != nil {
+		lb.proxyPool.Put(torProxy)
+		return nil, err
+	}
+
+	return &pooledConn{
+		Conn: conn,
+		release: func() {
+			lb.proxyPool.Put(torProxy)
+		},
+	}, nil
+}
+
+// SOCKS5Server provides a SOCKS5 endpoint that routes connections through the Tor pool.
+type SOCKS5Server struct {
+	lb       *LoadBalancer
+	listener net.Listener
+	wg       sync.WaitGroup
+}
+
+func NewSOCKS5Server(addr string, lb *LoadBalancer) (*SOCKS5Server, error) {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to listen on SOCKS5 address %s: %w", addr, err)
+	}
+
+	return &SOCKS5Server{
+		lb:       lb,
+		listener: listener,
+	}, nil
+}
+
+func (s *SOCKS5Server) Serve(errChan chan<- error) {
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			errChan <- fmt.Errorf("SOCKS5 accept failed: %w", err)
+			return
+		}
+
+		s.wg.Add(1)
+		go func(c net.Conn) {
+			defer s.wg.Done()
+			s.handleConnection(c)
+		}(conn)
+	}
+}
+
+func (s *SOCKS5Server) Shutdown() error {
+	if err := s.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	s.wg.Wait()
+	return nil
+}
+
+func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
+	defer clientConn.Close()
+
+	targetAddr, err := negotiateSOCKS5(clientConn)
+	if err != nil {
+		log.Printf("SOCKS5 negotiation failed: %v", err)
+		return
+	}
+
+	dialCtx, cancel := context.WithTimeout(context.Background(), HTTPClientTimeout)
+	defer cancel()
+
+	targetConn, err := s.lb.dialThroughPool(dialCtx, "tcp", targetAddr)
+	if err != nil {
+		_ = writeSOCKS5Reply(clientConn, 0x04)
+		log.Printf("SOCKS5 dial failed for %s: %v", targetAddr, err)
+		return
+	}
+	defer targetConn.Close()
+
+	if err := writeSOCKS5Reply(clientConn, 0x00); err != nil {
+		log.Printf("SOCKS5 reply failed: %v", err)
+		return
+	}
+
+	log.Printf("SOCKS5 tunnel established to %s through Tor pool", targetAddr)
+
+	errChan := make(chan error, 2)
+	go func() {
+		_, copyErr := io.Copy(targetConn, clientConn)
+		errChan <- copyErr
+	}()
+	go func() {
+		_, copyErr := io.Copy(clientConn, targetConn)
+		errChan <- copyErr
+	}()
+
+	if tunnelErr := <-errChan; tunnelErr != nil {
+		log.Printf("SOCKS5 tunnel closed with error for %s: %v", targetAddr, tunnelErr)
+	}
+}
+
+func negotiateSOCKS5(conn net.Conn) (string, error) {
+	methodHeader := make([]byte, 2)
+	if _, err := io.ReadFull(conn, methodHeader); err != nil {
+		return "", fmt.Errorf("failed to read SOCKS5 greeting: %w", err)
+	}
+
+	if methodHeader[0] != 0x05 {
+		return "", fmt.Errorf("unsupported SOCKS version: %d", methodHeader[0])
+	}
+
+	methodCount := int(methodHeader[1])
+	methods := make([]byte, methodCount)
+	if _, err := io.ReadFull(conn, methods); err != nil {
+		return "", fmt.Errorf("failed to read SOCKS5 auth methods: %w", err)
+	}
+
+	acceptNoAuth := false
+	for _, method := range methods {
+		if method == 0x00 {
+			acceptNoAuth = true
+			break
+		}
+	}
+	if !acceptNoAuth {
+		_, _ = conn.Write([]byte{0x05, 0xff})
+		return "", errors.New("no supported SOCKS5 auth method")
+	}
+
+	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
+		return "", fmt.Errorf("failed to write SOCKS5 auth response: %w", err)
+	}
+
+	reqHeader := make([]byte, 4)
+	if _, err := io.ReadFull(conn, reqHeader); err != nil {
+		return "", fmt.Errorf("failed to read SOCKS5 request header: %w", err)
+	}
+	if reqHeader[0] != 0x05 {
+		return "", fmt.Errorf("invalid SOCKS5 request version: %d", reqHeader[0])
+	}
+	if reqHeader[1] != 0x01 {
+		_ = writeSOCKS5Reply(conn, 0x07)
+		return "", fmt.Errorf("unsupported SOCKS5 command: %d", reqHeader[1])
+	}
+
+	host, err := readSOCKS5Address(conn, reqHeader[3])
+	if err != nil {
+		_ = writeSOCKS5Reply(conn, 0x08)
+		return "", err
+	}
+
+	portBytes := make([]byte, 2)
+	if _, err := io.ReadFull(conn, portBytes); err != nil {
+		return "", fmt.Errorf("failed to read SOCKS5 destination port: %w", err)
+	}
+	port := int(portBytes[0])<<8 | int(portBytes[1])
+
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
+}
+
+func readSOCKS5Address(conn net.Conn, atyp byte) (string, error) {
+	switch atyp {
+	case 0x01:
+		ip := make([]byte, net.IPv4len)
+		if _, err := io.ReadFull(conn, ip); err != nil {
+			return "", fmt.Errorf("failed to read IPv4 address: %w", err)
+		}
+		return net.IP(ip).String(), nil
+	case 0x03:
+		length := make([]byte, 1)
+		if _, err := io.ReadFull(conn, length); err != nil {
+			return "", fmt.Errorf("failed to read domain length: %w", err)
+		}
+		domain := make([]byte, int(length[0]))
+		if _, err := io.ReadFull(conn, domain); err != nil {
+			return "", fmt.Errorf("failed to read domain name: %w", err)
+		}
+		return string(domain), nil
+	case 0x04:
+		ip := make([]byte, net.IPv6len)
+		if _, err := io.ReadFull(conn, ip); err != nil {
+			return "", fmt.Errorf("failed to read IPv6 address: %w", err)
+		}
+		return net.IP(ip).String(), nil
+	default:
+		return "", fmt.Errorf("unsupported address type: %d", atyp)
+	}
+}
+
+func writeSOCKS5Reply(conn net.Conn, replyCode byte) error {
+	_, err := conn.Write([]byte{0x05, replyCode, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
+	return err
 }
 
 // ProxyHandler handles incoming requests and forwards them through a Tor proxy
@@ -312,17 +619,29 @@ func (lb *LoadBalancer) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 // SOCKS5ProxyAddressHandler returns the SOCKS5 proxy address with usage instructions
 func (lb *LoadBalancer) SOCKS5ProxyAddressHandler(w http.ResponseWriter, r *http.Request) {
+	host, portStr, err := net.SplitHostPort(SOCKS5AdvertisedAddress)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("invalid SOCKS5 address configuration: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("invalid SOCKS5 port configuration: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	response := map[string]interface{}{
-		"proxy":       "socks5://127.0.0.1:9050",
-		"host":        "127.0.0.1",
-		"port":        9050,
+		"proxy":       fmt.Sprintf("socks5://%s", SOCKS5AdvertisedAddress),
+		"host":        host,
+		"port":        port,
 		"protocol":    "socks5",
-		"description": "SOCKS5 proxy address for direct use",
+		"description": "SOCKS5 endpoint that distributes connections across independent Tor instances",
 		"usage_examples": []string{
-			"curl --socks5 127.0.0.1:9050 http://example.com",
-			"wget --socks-proxy=127.0.0.1:9050 http://example.com",
+			fmt.Sprintf("curl --socks5 %s http://example.com", SOCKS5AdvertisedAddress),
+			fmt.Sprintf("wget --socks-proxy=%s http://example.com", SOCKS5AdvertisedAddress),
 		},
-		"note": "This HTTP endpoint provides information about the SOCKS5 proxy. The actual SOCKS5 proxy service is running on port 9050.",
+		"note": "Each new SOCKS5 connection is routed through an independently running Tor process selected from the pool.",
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -347,7 +666,7 @@ func (lb *LoadBalancer) HealthCheckHandler(w http.ResponseWriter, r *http.Reques
 func (lb *LoadBalancer) ProxyAddressHandler(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"http_proxy":   fmt.Sprintf("http://localhost%s/http-proxy", ServerPort),
-		"socks5_proxy": "socks5://127.0.0.1:9050",
+		"socks5_proxy": fmt.Sprintf("socks5://%s", SOCKS5AdvertisedAddress),
 		"description":  "HTTP and SOCKS5 proxy addresses for use with other libraries",
 		"http_proxy_usage": []string{
 			fmt.Sprintf("curl --proxy http://localhost%s/http-proxy http://example.com", ServerPort),
@@ -355,8 +674,8 @@ func (lb *LoadBalancer) ProxyAddressHandler(w http.ResponseWriter, r *http.Reque
 			"Configure your HTTP client to use the http_proxy address",
 		},
 		"socks5_usage": []string{
-			"curl --socks5 127.0.0.1:9050 http://example.com",
-			"HTTPS_PROXY=socks5://127.0.0.1:9050 curl https://example.com",
+			fmt.Sprintf("curl --socks5 %s http://example.com", SOCKS5AdvertisedAddress),
+			fmt.Sprintf("HTTPS_PROXY=socks5://%s curl https://example.com", SOCKS5AdvertisedAddress),
 		},
 		"note": "The HTTP proxy endpoint can handle various request formats for maximum compatibility",
 	}
@@ -369,7 +688,7 @@ func (lb *LoadBalancer) ProxyAddressHandler(w http.ResponseWriter, r *http.Reque
 func (lb *LoadBalancer) InfoHandler(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"message":     "Tor Load Balancer Service",
-		"description": "A load balancer that distributes requests through Tor proxies for anonymity",
+		"description": "A load balancer that distributes requests through independent Tor proxies for anonymity",
 		"endpoints": []string{
 			"GET / - Service information",
 			"GET /health - Health check",
@@ -446,21 +765,11 @@ func (ps *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// Create context with cancel function
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Handle graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigChan
-		log.Println("Shutting down gracefully...")
-		cancel()
-	}()
-
 	// Create load balancer with Tor proxy pool (using configured pool size)
-	lb, err := NewLoadBalancer(ctx, ProxyPoolSize)
+	poolCtx, cancelPool := context.WithCancel(context.Background())
+	defer cancelPool()
+
+	lb, err := NewLoadBalancer(poolCtx, ProxyPoolSize)
 	if err != nil {
 		log.Fatalf("Failed to create load balancer: %v", err)
 	}
@@ -475,14 +784,48 @@ func main() {
 		Handler: proxyServer,
 	}
 
-	// Start server
-	log.Printf("Tor Load Balancer starting on %s", ServerPort)
-	log.Printf("Load balancer with Tor proxy rotation is ready (pool size: %d)", ProxyPoolSize)
-	log.Printf("HTTP Proxy available at: http://localhost%s/http-proxy", ServerPort)
-
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("Server failed to start: %v", err)
+	socksServer, err := NewSOCKS5Server(SOCKS5ListenAddress, lb)
+	if err != nil {
+		log.Fatalf("Failed to create SOCKS5 server: %v", err)
 	}
+
+	serverErrChan := make(chan error, 2)
+
+	go func() {
+		if serveErr := server.ListenAndServe(); serveErr != nil && serveErr != http.ErrServerClosed {
+			serverErrChan <- fmt.Errorf("HTTP server error: %w", serveErr)
+		}
+	}()
+
+	go socksServer.Serve(serverErrChan)
+
+	// Handle graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	log.Printf("Tor Load Balancer starting on %s", ServerPort)
+	log.Printf("Load balancer with independent Tor instances is ready (pool size: %d)", ProxyPoolSize)
+	log.Printf("HTTP Proxy available at: http://localhost%s/http-proxy", ServerPort)
+	log.Printf("SOCKS5 Proxy available at: socks5://%s", SOCKS5AdvertisedAddress)
+
+	select {
+	case sig := <-sigChan:
+		log.Printf("Received signal %s, shutting down gracefully...", sig)
+	case serveErr := <-serverErrChan:
+		log.Printf("Server terminated with error: %v", serveErr)
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	}
+	if err := socksServer.Shutdown(); err != nil {
+		log.Printf("SOCKS5 server shutdown error: %v", err)
+	}
+
+	cancelPool()
 
 	log.Println("Server stopped")
 }

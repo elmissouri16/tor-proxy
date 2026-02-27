@@ -24,8 +24,8 @@ COPY . .
 # Build the Go app
 RUN go build -o tor-proxy .
 
-# Expose port 8080
-EXPOSE 8080
+# Expose HTTP API and SOCKS5 ports
+EXPOSE 8080 9050
 
 # Command to run the executable
 CMD ["./tor-proxy"]

@@ -3,6 +3,9 @@ services:
     build: .
     ports:
       - "8080:8080"
+      - "${SOCKS5_HOST_PORT:-19050}:9050"
+    environment:
+      - SOCKS5_ADVERTISED_ADDRESS=127.0.0.1:${SOCKS5_HOST_PORT:-19050}
     # Mount tor configuration if needed
     volumes:
       - ./torrc:/etc/tor/torrc:ro

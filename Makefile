@@ -52,7 +52,7 @@ shell:
 	docker compose exec tor-proxy sh
 
 test:
-	./test-setup.sh
+	./test-endpoints.sh
 
 benchmark:
 	./benchmark.sh

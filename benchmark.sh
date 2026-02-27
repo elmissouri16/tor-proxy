@@ -7,6 +7,8 @@ echo
 TEST_URL="http://httpbin.org/ip"
 REQUESTS=30
 CONCURRENT_CONNECTIONS=10
+SOCKS5_HOST_PORT="${SOCKS5_HOST_PORT:-19050}"
+SOCKS5_ADDR="127.0.0.1:${SOCKS5_HOST_PORT}"
 
 # Function to measure response time
 measure_time() {
@@ -133,7 +135,7 @@ declare -a socks_times
 
 for i in $(seq 1 5); do
     start_time=$(date +%s%3N)
-    response=$(curl -s --max-time 30 --socks5 127.0.0.1:9050 "$TEST_URL" 2>/dev/null)
+    response=$(curl -s --max-time 30 --socks5 "$SOCKS5_ADDR" "$TEST_URL" 2>/dev/null)
     end_time=$(date +%s%3N)
     
     response_time=$((end_time - start_time))
@@ -184,7 +186,7 @@ start_time=$(date +%s%3N)
 
 # Run concurrent SOCKS5 requests
 for i in $(seq 1 $CONCURRENT_CONNECTIONS); do
-    curl -s --max-time 30 --socks5 127.0.0.1:9050 "$TEST_URL" > /dev/null 2>&1 &
+    curl -s --max-time 30 --socks5 "$SOCKS5_ADDR" "$TEST_URL" > /dev/null 2>&1 &
 done
 
 # Wait for all requests to complete
@@ -205,7 +207,7 @@ echo
 echo "Summary:"
 echo "- Direct Proxy Endpoint (/proxy): Routes individual requests through Tor"
 echo "- HTTP Proxy Endpoint (/http-proxy): HTTP endpoint that proxies requests through Tor"
-echo "- SOCKS5 Proxy (127.0.0.1:9050): Direct SOCKS5 proxy connection"
+echo "- SOCKS5 Proxy (${SOCKS5_ADDR}): Direct SOCKS5 proxy connection"
 echo
 echo "Note: Tor network speeds vary based on:"
 echo "- Current Tor network congestion"

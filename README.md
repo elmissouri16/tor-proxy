@@ -1,181 +1,82 @@
 # Tor Load Balancer
 
-This project provides a Tor load balancer that allows you to route HTTP requests through multiple Tor proxies for anonymity and IP rotation.
+HTTP + SOCKS5 proxy service that routes traffic through a pool of Tor exits.
 
-## Features
+## What It Does
 
-- **Load Balancing**: Automatically rotates requests through multiple Tor proxies
-- **Anonymity**: Each request uses a different Tor circuit
-- **Easy Integration**: Simple HTTP API for routing requests
-- **Direct Proxy Access**: SOCKS5 proxy available for direct application integration
-- **Containerized**: Easy deployment with Docker
+- Starts **10 independent Tor processes** (default), each with its own state.
+- Exposes:
+  - HTTP API on `:8080`
+  - SOCKS5 proxy on container `:9050`
+- Load-balances requests/connections across the Tor pool for IP rotation.
 
-## Architecture
+## Quick Start (Docker)
 
-```
-+-------------------------------------+
-|        Tor Load Balancer            |
-|                                     |
-|  +----------------------------+     |
-|  |     HTTP Endpoints         |     |
-|  +----------------------------+     |
-|                                     |
-|  +----------------------------+     |
-|  |    Load Balancer with      |     |
-|  |    Tor Proxy Rotation      |     |
-|  +----------------------------+     |
-|                                     |
-|  +----------------------------+     |
-|  |    Tornado Tor Pool        |     |
-|  |  (10 Tor proxies managed   |     |
-|  |   by Tornado library)      |     |
-|  +----------------------------+     |
-+-------------------------------------+
+```bash
+make setup
 ```
 
-## Quick Start
+By default, host ports are:
+- `8080` -> HTTP API
+- `19050` -> SOCKS5 proxy (mapped to container `9050`)
 
-### Using Docker (Recommended)
+Health check:
+```bash
+curl http://localhost:8080/health
+```
 
-1. Build and run the service:
-   ```bash
-   # Using Makefile (recommended)
-   make setup
-   
-   # Or using docker compose directly
-   docker compose up -d
-   ```
+SOCKS5 test:
+```bash
+curl --socks5-hostname 127.0.0.1:19050 https://httpbin.org/ip
+```
 
-2. Test the service:
-   ```bash
-   curl "http://localhost:8080/proxy?url=https://httpbin.org/ip"
-   ```
-
-### Building from Source
-
-1. Install dependencies:
-   ```bash
-   # On Ubuntu/Debian
-   sudo apt-get install tor
-   
-   # On macOS with Homebrew
-   brew install tor
-   ```
-
-2. Ensure Tor service is not running as a daemon:
-   ```bash
-   # On Ubuntu/Debian
-   sudo systemctl stop tor
-   
-   # On macOS
-   brew services stop tor
-   ```
-
-3. Build and run:
-   ```bash
-   go build -o tor-proxy .
-   ./tor-proxy
-   ```
+Use a different host SOCKS port:
+```bash
+SOCKS5_HOST_PORT=29050 make setup
+```
 
 ## API Endpoints
 
-- `GET /` - Service information
-- `GET /health` - Health check
-- `GET /proxy?url=<target_url>` - Route request through Tor proxy
-- `GET /http-proxy` - HTTP proxy endpoint
-- `GET /socks5-proxy` - Get SOCKS5 proxy address for direct use
+- `GET /` service info
+- `GET /health` health status
+- `GET /proxy?url=<target_url>` fetch URL through Tor
+- `ALL /http-proxy` HTTP proxy endpoint (supports CONNECT)
+- `GET /socks5-proxy` returns SOCKS5 connection details
+- `GET /proxy-address` returns HTTP + SOCKS5 usage info
 
-## Usage Examples
+## Development
 
-### Route individual requests through Tor
+Build and run locally:
 ```bash
-curl "http://localhost:8080/proxy?url=https://check.torproject.org/api/ip"
+go build -o tor-proxy .
+./tor-proxy
 ```
 
-### Use as HTTP proxy endpoint
+Format and static checks:
 ```bash
-# This endpoint proxies requests through Tor directly
-curl http://localhost:8080/http-proxy
+gofmt -w .
+go vet ./...
 ```
 
-### Get SOCKS5 proxy address for direct application use
-```bash
-# Returns the SOCKS5 proxy address as plain text
-curl http://localhost:8080/socks5-proxy
-# Output: 
-# SOCKS5 Proxy Address: socks5://127.0.0.1:9050
-# 
-# To use this SOCKS5 proxy directly:
-# - Configure your application to use SOCKS5 proxy at 127.0.0.1:9050
-# - With curl: curl --socks5 127.0.0.1:9050 http://example.com
-# - With wget: wget --socks-proxy=127.0.0.1:9050 http://example.com
-```
+Note: local run listens on `:9050` for SOCKS5. If another local Tor daemon already uses `9050`, stop it first.
 
-### Use SOCKS5 proxy directly with applications
-```bash
-# Use the SOCKS5 proxy with curl
-curl --socks5 127.0.0.1:9050 http://httpbin.org/ip
+## Makefile Commands
 
-# Set environment variables for applications that support HTTP_PROXY
-export http_proxy=socks5://127.0.0.1:9050
-export https_proxy=socks5://127.0.0.1:9050
-```
+- `make setup` build + start containers
+- `make logs` follow logs
+- `make stop` stop containers
+- `make clean` remove containers/networks/volumes
+- `make test` run endpoint smoke tests (`test-endpoints.sh`)
+- `make benchmark` run benchmark script (`benchmark.sh`)
 
-## Docker Management
+## Testing & Rotation Notes
 
-The project includes a Makefile for easy Docker management:
-
-```bash
-# Build and run the service
-make setup
-
-# View logs
-make logs
-
-# Stop the service
-make stop
-
-# Clean up containers
-make clean
-
-# Access container shell
-make shell
-
-# Run tests
-make test
-
-# Run benchmarks
-make benchmark
-```
-
-## How It Works
-
-1. When the service starts, it creates a pool of 10 Tor proxies using the Tornado library
-2. Each Tor proxy establishes its own circuit for IP anonymity
-3. Requests to the `/proxy` endpoint are automatically routed through different Tor proxies
-4. The load balancer randomly selects a healthy Tor proxy for each request
-5. Tornado handles proxy health checks automatically
-6. A SOCKS5 proxy is available on port 9050 for direct application integration
-
-## Configuration
-
-### Number of Tor Proxies
-
-The service uses 10 Tor proxies by default. This provides a good balance between anonymity and resource usage.
-
-### Ports
-
-- **8080**: HTTP API service
-- **9050**: SOCKS5 proxy service
-
-## Testing
-
-Run the built-in test suite:
-```bash
-make test
-```
-
-Run performance benchmarks:
-```bash
-make benchmark
-```
+- Quick smoke test:
+  ```bash
+  make test
+  ```
+- Benchmark:
+  ```bash
+  make benchmark
+  ```
+- Tor does not guarantee every request gets a unique exit IP; it provides probabilistic rotation.

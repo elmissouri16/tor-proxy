@@ -1,5 +1,8 @@
 #!/bin/bash
 
+SOCKS5_HOST_PORT="${SOCKS5_HOST_PORT:-19050}"
+SOCKS5_ADDR="127.0.0.1:${SOCKS5_HOST_PORT}"
+
 echo "=== Testing Tor Proxy Endpoints ==="
 echo
 
@@ -36,7 +39,7 @@ echo
 
 # Test 6: Direct SOCKS5 proxy usage (if curl supports it)
 echo "6. Testing direct SOCKS5 proxy usage"
-response=$(curl -s --socks5 127.0.0.1:9050 http://httpbin.org/ip 2>/dev/null || echo "SOCKS5 test failed or curl doesn't support SOCKS5")
+response=$(curl -s --socks5 "$SOCKS5_ADDR" http://httpbin.org/ip 2>/dev/null || echo "SOCKS5 test failed or curl doesn't support SOCKS5")
 echo "Response: $response"
 echo
 
