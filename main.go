@@ -24,7 +24,7 @@ import (
 // Configuration settings
 const (
 	// Number of Tor proxies to maintain in the pool
-	ProxyPoolSize = 10
+	ProxyPoolSize = 20
 
 	// Server port to listen on
 	ServerPort = ":8080"
