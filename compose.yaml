@@ -1,11 +1,10 @@
 services:
   tor-proxy:
-    image: golang:1.24-alpine
+    image: alpine:3.22
     restart: unless-stopped
     working_dir: /app
     command: >
-      sh -lc "export PATH=/usr/local/go/bin:$PATH &&
-      apk add --no-cache tor curl &&
+      sh -lc "apk add --no-cache go tor curl &&
       go mod download &&
       go run ."
     volumes:

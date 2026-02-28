@@ -38,7 +38,7 @@ SOCKS5_HOST_PORT=29050 make setup
 ## Arcane Compatibility
 
 - This repo includes `compose.yaml` for Arcane Projects.
-- `compose.yaml` uses a pullable base image (`golang:1.24-alpine`) so Arcane can start the project even when deployment paths do not run image builds first.
+- `compose.yaml` uses a pullable base image (`alpine:3.22`) so Arcane can start the project even when deployment paths do not run image builds first.
 - The service runs source from the project directory (`/app`) and installs runtime deps on startup.
 - First startup is slower (package install + module download); subsequent restarts are faster due to cache volumes.
 
