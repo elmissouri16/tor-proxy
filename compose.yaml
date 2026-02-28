@@ -1,11 +1,23 @@
 services:
   tor-proxy:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: golang:1.24-alpine
     restart: unless-stopped
+    working_dir: /app
+    command: >
+      sh -lc "export PATH=/usr/local/go/bin:$PATH &&
+      apk add --no-cache tor curl &&
+      go mod download &&
+      go run ."
+    volumes:
+      - ./:/app
+      - go-mod-cache:/go/pkg/mod
+      - go-build-cache:/root/.cache/go-build
     ports:
       - "8080:8080"
       - "${SOCKS5_HOST_PORT:-19050}:9050"
     environment:
       - SOCKS5_ADVERTISED_ADDRESS=127.0.0.1:${SOCKS5_HOST_PORT:-19050}
+
+volumes:
+  go-mod-cache:
+  go-build-cache:

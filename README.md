@@ -37,8 +37,10 @@ SOCKS5_HOST_PORT=29050 make setup
 
 ## Arcane Compatibility
 
-- This repo now includes `compose.yaml` for Arcane Projects.
-- `torrc` is baked into the image via `Dockerfile` (no host bind mount required), which avoids Arcane host-path mapping issues.
+- This repo includes `compose.yaml` for Arcane Projects.
+- `compose.yaml` uses a pullable base image (`golang:1.24-alpine`) so Arcane can start the project even when deployment paths do not run image builds first.
+- The service runs source from the project directory (`/app`) and installs runtime deps on startup.
+- First startup is slower (package install + module download); subsequent restarts are faster due to cache volumes.
 
 ## API Endpoints
 

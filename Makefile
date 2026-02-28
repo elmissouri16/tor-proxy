@@ -9,7 +9,7 @@ help:
 	@echo ""
 	@echo "Commands:"
 	@echo "  help        - Show this help"
-	@echo "  build       - Build the Docker image"
+	@echo "  build       - Pull base images and warm caches"
 	@echo "  run         - Run the Tor proxy service"
 	@echo "  stop        - Stop the Tor proxy service"
 	@echo "  logs        - View container logs"
@@ -22,10 +22,10 @@ help:
 	@echo "  benchmark   - Run benchmark tests"
 	@echo "  setup       - Build and run the service"
 	@echo "  dev         - Run in development mode (with logs)"
-	@echo "  rebuild     - Clean and rebuild the Docker image"
+	@echo "  rebuild     - Clean and pull base images again"
 
 build:
-	docker compose build
+	docker compose pull
 
 run:
 	docker compose up -d
