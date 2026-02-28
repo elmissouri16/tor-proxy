@@ -35,6 +35,11 @@ Use a different host SOCKS port:
 SOCKS5_HOST_PORT=29050 make setup
 ```
 
+## Arcane Compatibility
+
+- This repo now includes `compose.yaml` for Arcane Projects.
+- `torrc` is baked into the image via `Dockerfile` (no host bind mount required), which avoids Arcane host-path mapping issues.
+
 ## API Endpoints
 
 - `GET /` service info
